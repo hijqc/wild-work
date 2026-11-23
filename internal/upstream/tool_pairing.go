@@ -336,7 +336,86 @@ func SanitizeConversationMessages(messages []any) []any {
 		})
 	}
 
-	return out
+	// 3) 合并相邻同角色 user 与 system 消息（确保严格交替 system? -> user -> assistant -> user -> ...）
+	//    Codex 会在一次对话中发送多条环境与指令 user 消息，导致相邻连续 user，通义/Spring 等后端强校验会报 400
+	merged := make([]any, 0, len(out))
+	for _, m := range out {
+		msg, ok := m.(map[string]any)
+		if !ok {
+			merged = append(merged, m)
+			continue
+		}
+		if len(merged) == 0 {
+			merged = append(merged, msg)
+			continue
+		}
+		lastMsg, lastOk := merged[len(merged)-1].(map[string]any)
+		if !lastOk {
+			merged = append(merged, msg)
+			continue
+		}
+		role, _ := msg["role"].(string)
+		lastRole, _ := lastMsg["role"].(string)
+
+		if role == "user" && lastRole == "user" {
+			mergeUserMessages(lastMsg, msg)
+			continue
+		}
+		if role == "system" && lastRole == "system" {
+			mergeSystemMessages(lastMsg, msg)
+			continue
+		}
+		merged = append(merged, msg)
+	}
+
+	return merged
+}
+
+func mergeUserMessages(dst, src map[string]any) {
+	dstContent := dst["content"]
+	srcContent := src["content"]
+
+	dstStr, dstIsStr := dstContent.(string)
+	srcStr, srcIsStr := srcContent.(string)
+	if dstIsStr && srcIsStr {
+		if strings.TrimSpace(dstStr) == "" {
+			dst["content"] = srcStr
+		} else if strings.TrimSpace(srcStr) != "" {
+			dst["content"] = dstStr + "\n\n" + srcStr
+		}
+		return
+	}
+
+	dstBlocks := toContentBlocks(dstContent)
+	srcBlocks := toContentBlocks(srcContent)
+	dst["content"] = append(dstBlocks, srcBlocks...)
+}
+
+func mergeSystemMessages(dst, src map[string]any) {
+	dstText := extractMessageText(dst["content"])
+	srcText := extractMessageText(src["content"])
+	if dstText == "" {
+		dst["content"] = srcText
+	} else if srcText != "" {
+		dst["content"] = dstText + "\n\n" + srcText
+	}
+}
+
+func toContentBlocks(c any) []any {
+	if c == nil {
+		return nil
+	}
+	switch v := c.(type) {
+	case string:
+		if strings.TrimSpace(v) == "" {
+			return nil
+		}
+		return []any{map[string]any{"type": "text", "text": v}}
+	case []any:
+		return v
+	default:
+		return []any{map[string]any{"type": "text", "text": fmt.Sprint(v)}}
+	}
 }
 
 func extractMessageText(c any) string {

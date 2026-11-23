@@ -30,6 +30,7 @@ type sseError struct {
 
 func (e *sseError) Error() string          { return fmt.Sprintf("upstream %d: %s", e.status, e.msg) }
 func (e *sseError) Kind() provider.ErrKind { return Classify(e.status, e.msg) }
+func (e *sseError) HTTPStatus() int        { return e.status }
 
 // envelope SSE 外层信封。
 type envelope struct {

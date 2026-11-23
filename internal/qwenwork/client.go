@@ -306,10 +306,11 @@ func (c *Client) prepareChatBody(body []byte) ([]byte, error) {
 	// stream 强制 true：上游为 SSE-only 端点（非流式由 Stream/Aggregate 聚合实现）
 	obj["stream"] = true
 
-	// 归一化 tool_choice（qwenwork 上游规定：tools 为空时删除 tool_choice，避免 400 参数校验失败）
+	// 归一化 tool_choice（qwenwork 上游规定：tools 为空时删除 tool_choice 与 parallel_tool_calls，避免 400 参数校验失败）
 	upstream.NormalizeToolChoice(obj)
 	if tools, ok := obj["tools"].([]any); !ok || len(tools) == 0 {
 		delete(obj, "tool_choice")
+		delete(obj, "parallel_tool_calls")
 	}
 
 	// 对 messages 实施安全清洗：合并首部系统提示、折叠中间开发者指令至用户上下文、清理孤儿工具配对与空 assistant

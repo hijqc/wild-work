@@ -1302,9 +1302,19 @@ func (h *Handler) serveRotation(
 					lastKind = kind
 					// 额度耗尽透 402（付费墙语义，客户端/用户一看就知道要充值/换号），
 					// 其余保留上游原始状态码；body 用原文，保留上游错误码与文案。
-					lastStatus = http.StatusPaymentRequired
+					lastStatus = http.StatusBadGateway
+					if kind == provider.ErrHardCredit {
+						lastStatus = http.StatusPaymentRequired
+					} else if kind == provider.ErrSoftRate {
+						lastStatus = http.StatusTooManyRequests
+					}
 					if pe := (*provider.Error)(nil); errors.As(serr, &pe) && pe.Status >= 400 {
 						lastStatus = pe.Status
+					} else {
+						var hse interface{ HTTPStatus() int }
+						if errors.As(serr, &hse) && hse.HTTPStatus() >= 400 {
+							lastStatus = hse.HTTPStatus()
+						}
 					}
 					lastBody = []byte(serr.Error())
 					continue

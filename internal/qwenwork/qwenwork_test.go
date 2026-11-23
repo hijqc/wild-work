@@ -417,6 +417,7 @@ func TestPrepareChatBody_SanitizesMessagesAndToolChoice(t *testing.T) {
 	body := []byte(`{
 		"model": "qwen4-max",
 		"tool_choice": "auto",
+		"parallel_tool_calls": true,
 		"messages": [
 			{"role": "system", "content": "You are assistant."},
 			{"role": "developer", "content": "Rule 1."},
@@ -439,9 +440,12 @@ func TestPrepareChatBody_SanitizesMessagesAndToolChoice(t *testing.T) {
 		t.Fatalf("unmarshal prepared body: %v", err)
 	}
 
-	// 1. tool_choice 必须被剔除（因为 tools 为空）
+	// 1. tool_choice 与 parallel_tool_calls 必须被剔除（因为 tools 为空）
 	if tc, has := obj["tool_choice"]; has {
 		t.Fatalf("tool_choice should be removed when tools is empty, got %v", tc)
+	}
+	if ptc, has := obj["parallel_tool_calls"]; has {
+		t.Fatalf("parallel_tool_calls should be removed when tools is empty, got %v", ptc)
 	}
 
 	// 2. 消息检验
@@ -452,11 +456,9 @@ func TestPrepareChatBody_SanitizesMessagesAndToolChoice(t *testing.T) {
 
 	// expected:
 	// msgs[0]: system: "You are assistant.\n\nRule 1."
-	// msgs[1]: user: "Turn 1"
-	// (assistant with orphan tool call and empty content is pruned)
-	// msgs[2]: user: "<context>time</context>\n\nTurn 2"
-	if len(msgs) != 3 {
-		t.Fatalf("expected 3 messages, got %d: %#v", len(msgs), msgs)
+	// msgs[1]: user: "Turn 1\n\n<context>time</context>\n\nTurn 2" (空 assistant 剔除后相邻 user 自动合并，避免 400 校验失败)
+	if len(msgs) != 2 {
+		t.Fatalf("expected 2 messages, got %d: %#v", len(msgs), msgs)
 	}
 
 	m0, _ := msgs[0].(map[string]any)
@@ -465,12 +467,8 @@ func TestPrepareChatBody_SanitizesMessagesAndToolChoice(t *testing.T) {
 	}
 
 	m1, _ := msgs[1].(map[string]any)
-	if m1["role"] != "user" || m1["content"] != "Turn 1" {
-		t.Fatalf("m1 should be user Turn 1, got %#v", m1)
-	}
-
-	m2, _ := msgs[2].(map[string]any)
-	if m2["role"] != "user" || m2["content"] != "<context>time</context>\n\nTurn 2" {
-		t.Fatalf("m2 should be user Turn 2 with folded developer context, got %#v", m2)
+	expectedUser := "Turn 1\n\n<context>time</context>\n\nTurn 2"
+	if m1["role"] != "user" || m1["content"] != expectedUser {
+		t.Fatalf("m1 should be merged user %q, got %#v", expectedUser, m1)
 	}
 }

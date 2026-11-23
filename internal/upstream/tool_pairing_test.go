@@ -3,6 +3,7 @@ package upstream
 import (
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -527,8 +528,12 @@ func TestSanitizeConversationMessages_EmptyAssistantPruned(t *testing.T) {
 		map[string]any{"role": "user", "content": "Turn 2"},
 	}
 	out := SanitizeConversationMessages(in)
-	if len(out) != 2 {
-		t.Fatalf("empty assistant should be pruned, got %d: %#v", len(out), out)
+	if len(out) != 1 {
+		t.Fatalf("empty assistant should be pruned and adjacent users merged, got %d: %#v", len(out), out)
+	}
+	u := out[0].(map[string]any)
+	if u["role"] != "user" || u["content"] != "Turn 1\n\nTurn 2" {
+		t.Fatalf("expected merged user content 'Turn 1\\n\\nTurn 2', got %#v", u["content"])
 	}
 }
 
@@ -541,8 +546,12 @@ func TestSanitizeConversationMessages_OrphanToolAndAssistantPruned(t *testing.T)
 		map[string]any{"role": "user", "content": "Turn 2"},
 	}
 	out := SanitizeConversationMessages(in)
-	if len(out) != 2 {
-		t.Fatalf("assistant with orphan tool call and empty content should be pruned, got %d: %#v", len(out), out)
+	if len(out) != 1 {
+		t.Fatalf("assistant with orphan tool call should be pruned and adjacent users merged, got %d: %#v", len(out), out)
+	}
+	u := out[0].(map[string]any)
+	if u["role"] != "user" || u["content"] != "Turn 1\n\nTurn 2" {
+		t.Fatalf("expected merged user content 'Turn 1\\n\\nTurn 2', got %#v", u["content"])
 	}
 }
 
@@ -570,3 +579,76 @@ func TestSanitizeConversationMessages_MultiModalUser(t *testing.T) {
 		t.Fatalf("b0 should be prepended text block, got %#v", b0)
 	}
 }
+
+func TestSanitizeConversationMessages_MergeAdjacentUserMessages(t *testing.T) {
+	in := []any{
+		map[string]any{"role": "user", "content": "Hello"},
+		map[string]any{"role": "user", "content": "World"},
+		map[string]any{"role": "assistant", "content": "Hi there"},
+		map[string]any{"role": "user", "content": "Part 1"},
+		map[string]any{"role": "user", "content": "Part 2"},
+	}
+	out := SanitizeConversationMessages(in)
+	if len(out) != 3 {
+		t.Fatalf("expected 3 messages, got %d: %#v", len(out), out)
+	}
+	m0 := out[0].(map[string]any)
+	if m0["role"] != "user" || m0["content"] != "Hello\n\nWorld" {
+		t.Fatalf("expected merged user content 'Hello\\n\\nWorld', got %#v", m0["content"])
+	}
+	m1 := out[1].(map[string]any)
+	if m1["role"] != "assistant" || m1["content"] != "Hi there" {
+		t.Fatalf("expected assistant untouched, got %#v", m1)
+	}
+	m2 := out[2].(map[string]any)
+	if m2["role"] != "user" || m2["content"] != "Part 1\n\nPart 2" {
+		t.Fatalf("expected merged user content 'Part 1\\n\\nPart 2', got %#v", m2["content"])
+	}
+}
+
+func TestSanitizeConversationMessages_CodexInitPattern(t *testing.T) {
+	// Codex 初始化请求模式：developer -> user -> developer -> user
+	// 期望：合并系统指令为 1 个 system，后续折叠/合并为 1 个 user，总共 2 个消息 [system, user]
+	in := []any{
+		map[string]any{"role": "developer", "content": "You are Codex."},
+		map[string]any{"role": "user", "content": "# Project Context\nfile.go"},
+		map[string]any{"role": "developer", "content": "Current time: 2026-11-23"},
+		map[string]any{"role": "user", "content": "Hello!"},
+	}
+	out := SanitizeConversationMessages(in)
+	if len(out) != 2 {
+		t.Fatalf("expected 2 messages (system, user), got %d: %#v", len(out), out)
+	}
+	s := out[0].(map[string]any)
+	if s["role"] != "system" || s["content"] != "You are Codex." {
+		t.Fatalf("expected system message, got %#v", s)
+	}
+	u := out[1].(map[string]any)
+	if u["role"] != "user" {
+		t.Fatalf("expected user message, got %#v", u)
+	}
+	contentStr, ok := u["content"].(string)
+	if !ok {
+		t.Fatalf("expected string content, got %#v", u["content"])
+	}
+	if !strings.Contains(contentStr, "Project Context") || !strings.Contains(contentStr, "Current time") || !strings.Contains(contentStr, "Hello!") {
+		t.Fatalf("expected content to contain all parts, got: %s", contentStr)
+	}
+}
+
+func TestSanitizeConversationMessages_MergeAdjacentSystemMessages(t *testing.T) {
+	in := []any{
+		map[string]any{"role": "system", "content": "System 1"},
+		map[string]any{"role": "system", "content": "System 2"},
+		map[string]any{"role": "user", "content": "User prompt"},
+	}
+	out := SanitizeConversationMessages(in)
+	if len(out) != 2 {
+		t.Fatalf("expected 2 messages, got %d: %#v", len(out), out)
+	}
+	s := out[0].(map[string]any)
+	if s["role"] != "system" || s["content"] != "System 1\n\nSystem 2" {
+		t.Fatalf("expected merged system 'System 1\\n\\nSystem 2', got %#v", s["content"])
+	}
+}
+

@@ -85,8 +85,9 @@ func TestResponsesToChat_ModelSwitchDeveloperContext(t *testing.T) {
 // tool_choice 必须被剔除，避免上游因 tools 为空却传 tool_choice 判 400 参数非法。
 func TestResponsesToChat_EmptyToolsDropsToolChoice(t *testing.T) {
 	in := map[string]any{
-		"model":       "qwenwork/qwen4-max",
-		"tool_choice": "auto",
+		"model":               "qwenwork/qwen4-max",
+		"tool_choice":         "auto",
+		"parallel_tool_calls": true,
 		"tools": []any{
 			map[string]any{"type": "web_search", "name": "search"}, // 非 function 工具会被跳过
 		},
@@ -104,10 +105,13 @@ func TestResponsesToChat_EmptyToolsDropsToolChoice(t *testing.T) {
 	if tc, hasTC := req["tool_choice"]; hasTC {
 		t.Fatalf("tool_choice should be dropped when tools is empty, got %v", tc)
 	}
+	if ptc, hasPTC := req["parallel_tool_calls"]; hasPTC {
+		t.Fatalf("parallel_tool_calls should be dropped when tools is empty, got %v", ptc)
+	}
 }
 
 // TestResponsesToChat_OrphanFunctionCallCleaned 验证：客户端之前一轮异常中断导致只有 function_call
-// 而没有对应的 function_call_output 时，孤儿工具调用能自愈并剔除空 assistant 消息。
+// 而没有对应的 function_call_output 时，孤儿工具调用能自愈并剔除空 assistant 消息，相邻 user 消息自动合并。
 func TestResponsesToChat_OrphanFunctionCallCleaned(t *testing.T) {
 	in := map[string]any{
 		"model": "qwenwork/qwen4-max",
@@ -130,12 +134,11 @@ func TestResponsesToChat_OrphanFunctionCallCleaned(t *testing.T) {
 	}
 
 	msgs, _ := req["messages"].([]any)
-	if len(msgs) != 2 {
-		t.Fatalf("expected 2 messages (empty assistant pruned), got %d: %#v", len(msgs), msgs)
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 message (empty assistant pruned and adjacent users merged), got %d: %#v", len(msgs), msgs)
 	}
 	m0, _ := msgs[0].(map[string]any)
-	m1, _ := msgs[1].(map[string]any)
-	if m0["role"] != "user" || m1["role"] != "user" {
-		t.Fatalf("expected two user messages, got %#v, %#v", m0, m1)
+	if m0["role"] != "user" || m0["content"] != "turn 1\n\nturn 2" {
+		t.Fatalf("expected merged user message 'turn 1\\n\\nturn 2', got %#v", m0)
 	}
 }

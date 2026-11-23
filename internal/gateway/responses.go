@@ -173,7 +173,9 @@ func responsesToChat(in map[string]any, resolvedModel string, maxTokensCap int) 
 		}
 	}
 	if v, ok := in["parallel_tool_calls"].(bool); ok {
-		out["parallel_tool_calls"] = v
+		if _, hasTools := out["tools"]; hasTools {
+			out["parallel_tool_calls"] = v
+		}
 	}
 
 	// text.format（Responses）→ response_format（Chat）；兼容老式 response_format 直传
