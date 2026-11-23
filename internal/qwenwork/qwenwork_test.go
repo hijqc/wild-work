@@ -406,3 +406,71 @@ func TestRefreshExpiresInSeconds(t *testing.T) {
 		t.Fatalf("token 未更新: %q / %q", a.AccessToken, a.RefreshToken)
 	}
 }
+
+// TestPrepareChatBody_SanitizesMessagesAndToolChoice 验证 qwenwork prepareChatBody：
+// 1. 当 tools 为空时，删除 tool_choice；
+// 2. 将首部 system/developer 合并为 1 条；
+// 3. 将会话中途的 developer 上下文折叠进随后的 user 消息；
+// 4. 清理孤儿工具调用并删除空 assistant 消息。
+func TestPrepareChatBody_SanitizesMessagesAndToolChoice(t *testing.T) {
+	c := New()
+	body := []byte(`{
+		"model": "qwen4-max",
+		"tool_choice": "auto",
+		"messages": [
+			{"role": "system", "content": "You are assistant."},
+			{"role": "developer", "content": "Rule 1."},
+			{"role": "user", "content": "Turn 1"},
+			{"role": "assistant", "content": "", "tool_calls": [
+				{"id": "c_orphan", "type": "function", "function": {"name": "test", "arguments": "{}"}}
+			]},
+			{"role": "developer", "content": "<context>time</context>"},
+			{"role": "user", "content": "Turn 2"}
+		]
+	}`)
+
+	prep, err := c.prepareChatBody(body)
+	if err != nil {
+		t.Fatalf("prepareChatBody failed: %v", err)
+	}
+
+	var obj map[string]any
+	if err := json.Unmarshal(prep, &obj); err != nil {
+		t.Fatalf("unmarshal prepared body: %v", err)
+	}
+
+	// 1. tool_choice 必须被剔除（因为 tools 为空）
+	if tc, has := obj["tool_choice"]; has {
+		t.Fatalf("tool_choice should be removed when tools is empty, got %v", tc)
+	}
+
+	// 2. 消息检验
+	msgs, ok := obj["messages"].([]any)
+	if !ok {
+		t.Fatalf("messages is missing or not slice")
+	}
+
+	// expected:
+	// msgs[0]: system: "You are assistant.\n\nRule 1."
+	// msgs[1]: user: "Turn 1"
+	// (assistant with orphan tool call and empty content is pruned)
+	// msgs[2]: user: "<context>time</context>\n\nTurn 2"
+	if len(msgs) != 3 {
+		t.Fatalf("expected 3 messages, got %d: %#v", len(msgs), msgs)
+	}
+
+	m0, _ := msgs[0].(map[string]any)
+	if m0["role"] != "system" || m0["content"] != "You are assistant.\n\nRule 1." {
+		t.Fatalf("m0 should be consolidated system, got %#v", m0)
+	}
+
+	m1, _ := msgs[1].(map[string]any)
+	if m1["role"] != "user" || m1["content"] != "Turn 1" {
+		t.Fatalf("m1 should be user Turn 1, got %#v", m1)
+	}
+
+	m2, _ := msgs[2].(map[string]any)
+	if m2["role"] != "user" || m2["content"] != "<context>time</context>\n\nTurn 2" {
+		t.Fatalf("m2 should be user Turn 2 with folded developer context, got %#v", m2)
+	}
+}

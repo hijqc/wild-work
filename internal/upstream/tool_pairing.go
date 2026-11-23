@@ -11,7 +11,12 @@
 // 的条目让会话自愈，宁可丢一轮工具上下文，也好过整条会话死亡。
 package upstream
 
-// repackToolResultBlocks 把插在 assistant.tool_calls 与其 tool 结果之间的非 tool 消息
+import (
+	"fmt"
+	"strings"
+)
+
+// RepackToolResultBlocks 把插在 assistant.tool_calls 与其 tool 结果之间的非 tool 消息
 // 挪到整组之后，保证同一批 tool_call 的结果在 wire 上连续。
 //
 // 背景：Codex 的 image_resize_notice 特性会把 <image_resize_notice> 作为一条
@@ -30,7 +35,7 @@ package upstream
 //
 // 结果顺序保持不变（同批 tool_call 的原相对顺序 = 结果顺序），不引入新的顺序敏感
 // 问题。无插入消息时零改动零分配（返回原 slice）。
-func repackToolResultBlocks(messages []any) ([]any, bool) {
+func RepackToolResultBlocks(messages []any) ([]any, bool) {
 	if len(messages) < 3 {
 		return messages, false
 	}
@@ -107,7 +112,11 @@ func repackToolResultBlocks(messages []any) ([]any, bool) {
 	return out, true
 }
 
-// cleanupOrphanToolCalls 剔除无法配对的 tool_call 与 tool 结果（所有模型，独立于
+func repackToolResultBlocks(messages []any) ([]any, bool) {
+	return RepackToolResultBlocks(messages)
+}
+
+// CleanupOrphanToolCalls 剔除无法配对的 tool_call 与 tool 结果（所有模型，独立于
 // deepseek-only 的 sanitize 开关）。语义对齐参考仓库 resolveToolPairing：
 //
 //   - 收集全线 role:tool 消息的 tool_call_id（结果集）与 assistant.tool_calls[].id（调用集）；
@@ -118,7 +127,7 @@ func repackToolResultBlocks(messages []any) ([]any, bool) {
 //
 // 这是「让请求通过」的安全网：只要存在合法配对就整段保留这些字段，绝不吞掉正确配对。
 // 返回清理后的 slice（无改动时等于原 slice，勿依赖其是否新分配）及是否发生删除。
-func cleanupOrphanToolCalls(messages []any) ([]any, bool) {
+func CleanupOrphanToolCalls(messages []any) ([]any, bool) {
 	if len(messages) == 0 {
 		return messages, false
 	}
@@ -223,4 +232,150 @@ func cleanupOrphanToolCalls(messages []any) ([]any, bool) {
 		return messages, false
 	}
 	return kept, true
+}
+
+func cleanupOrphanToolCalls(messages []any) ([]any, bool) {
+	return CleanupOrphanToolCalls(messages)
+}
+
+// SanitizeConversationMessages 规整并清洗对话历史：
+// 1. 重排插在 tool 调用与结果之间的非 tool 消息（如 Codex image_resize_notice / developer 提示）；
+// 2. 剔除无法配对的孤儿 tool_call（未回填结果）与孤儿 role:tool 结果；
+// 3. 剔除既无有效 content 又无有效 tool_calls 的空 assistant 消息（防止上游 schema 报错）；
+// 4. 合并首部多条 system/developer 消息为单一 system 消息（部分上游如通义/Spring 只允许一条首部 system）；
+// 5. 将对话开启后（首条非系统消息之后）插入的 system/developer 消息折叠进随后的 user 消息上下文；
+//    若尾部无后续 user 消息，则将其转为 user 消息，确保全链路角色严格交替且无中间 system 污染。
+func SanitizeConversationMessages(messages []any) []any {
+	if len(messages) == 0 {
+		return messages
+	}
+
+	// 1) 重排与孤儿清理
+	messages, _ = RepackToolResultBlocks(messages)
+	messages, _ = CleanupOrphanToolCalls(messages)
+
+	// 2) 提取并清洗
+	var (
+		leadingSysTexts []string
+		sawNonSystem    bool
+		pendingContext  []string
+		out             = make([]any, 0, len(messages))
+	)
+
+	for _, m := range messages {
+		msg, ok := m.(map[string]any)
+		if !ok {
+			out = append(out, m)
+			sawNonSystem = true
+			continue
+		}
+
+		rawRole, _ := msg["role"].(string)
+		role := strings.ToLower(strings.TrimSpace(rawRole))
+
+		// 检查空 assistant 消息：无内容且无 tool_calls
+		if role == "assistant" {
+			tcs, hasCalls := msg["tool_calls"].([]any)
+			contentStr := extractMessageText(msg["content"])
+			if (!hasCalls || len(tcs) == 0) && contentStr == "" {
+				// 丢弃无效的空 assistant 消息
+				continue
+			}
+		}
+
+		// 处理 system 与 developer 角色
+		if role == "system" || role == "developer" {
+			txt := extractMessageText(msg["content"])
+			if txt == "" {
+				continue
+			}
+			if !sawNonSystem {
+				// 首部系统提示，收集待统一合并
+				leadingSysTexts = append(leadingSysTexts, txt)
+			} else {
+				// 对话中途插入的 system/developer（如 Codex 切换模型或更新环境上下文）
+				pendingContext = append(pendingContext, txt)
+			}
+			continue
+		}
+
+		// 遇到非 system 消息
+		if !sawNonSystem {
+			sawNonSystem = true
+			if len(leadingSysTexts) > 0 {
+				out = append(out, map[string]any{
+					"role":    "system",
+					"content": strings.Join(leadingSysTexts, "\n\n"),
+				})
+			}
+		}
+
+		// 如果当前是 user 消息且有待注入的上下文，前置追加
+		if role == "user" && len(pendingContext) > 0 {
+			ctxPrefix := strings.Join(pendingContext, "\n\n")
+			pendingContext = nil
+			prependTextToUser(msg, ctxPrefix)
+		}
+
+		out = append(out, msg)
+	}
+
+	// 若整个 messages 全是 system/developer 消息
+	if !sawNonSystem && len(leadingSysTexts) > 0 {
+		out = append(out, map[string]any{
+			"role":    "system",
+			"content": strings.Join(leadingSysTexts, "\n\n"),
+		})
+	}
+
+	// 若尾部有残留的 pendingContext（末尾没有 user 消息去承载它）
+	if len(pendingContext) > 0 {
+		out = append(out, map[string]any{
+			"role":    "user",
+			"content": strings.Join(pendingContext, "\n\n"),
+		})
+	}
+
+	return out
+}
+
+func extractMessageText(c any) string {
+	if c == nil {
+		return ""
+	}
+	switch v := c.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case []any:
+		var parts []string
+		for _, b := range v {
+			if bm, ok := b.(map[string]any); ok {
+				if t, ok := bm["text"].(string); ok && strings.TrimSpace(t) != "" {
+					parts = append(parts, strings.TrimSpace(t))
+				}
+			}
+		}
+		return strings.Join(parts, "\n")
+	default:
+		return strings.TrimSpace(fmt.Sprint(v))
+	}
+}
+
+func prependTextToUser(msg map[string]any, prefix string) {
+	if prefix == "" {
+		return
+	}
+	switch v := msg["content"].(type) {
+	case string:
+		if strings.TrimSpace(v) == "" {
+			msg["content"] = prefix
+		} else {
+			msg["content"] = prefix + "\n\n" + v
+		}
+	case []any:
+		newBlock := map[string]any{"type": "text", "text": prefix}
+		msg["content"] = append([]any{newBlock}, v...)
+	default:
+		msg["content"] = prefix
+	}
 }

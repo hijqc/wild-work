@@ -451,3 +451,122 @@ func TestRepackThenCleanupRealShape(t *testing.T) {
 	assertRepackPairsContiguous(t, msgs)
 	assertPairingSymmetric(t, msgs)
 }
+
+func TestSanitizeConversationMessages_LeadingSystemConsolidation(t *testing.T) {
+	in := []any{
+		map[string]any{"role": "system", "content": "You are Codex."},
+		map[string]any{"role": "developer", "content": "Time: 2026-11-23"},
+		map[string]any{"role": "user", "content": "Hello"},
+	}
+	out := SanitizeConversationMessages(in)
+	if len(out) != 2 {
+		t.Fatalf("expected 2 messages, got %d: %#v", len(out), out)
+	}
+	m0, ok := out[0].(map[string]any)
+	if !ok || m0["role"] != "system" {
+		t.Fatalf("msg[0] should be system, got %#v", out[0])
+	}
+	want := "You are Codex.\n\nTime: 2026-11-23"
+	if m0["content"] != want {
+		t.Fatalf("msg[0] content = %q, want %q", m0["content"], want)
+	}
+	m1, _ := out[1].(map[string]any)
+	if m1["role"] != "user" || m1["content"] != "Hello" {
+		t.Fatalf("msg[1] should be user Hello, got %#v", m1)
+	}
+}
+
+func TestSanitizeConversationMessages_MidConversationDeveloperFolding(t *testing.T) {
+	in := []any{
+		map[string]any{"role": "system", "content": "You are Codex."},
+		map[string]any{"role": "user", "content": "Turn 1"},
+		map[string]any{"role": "assistant", "content": "Answer 1"},
+		map[string]any{"role": "developer", "content": "<client_time_context>2026-11-23</client_time_context>"},
+		map[string]any{"role": "user", "content": "Turn 2"},
+	}
+	out := SanitizeConversationMessages(in)
+	if len(out) != 4 {
+		t.Fatalf("expected 4 messages, got %d: %#v", len(out), out)
+	}
+	// 验证角色序列：严格为 system -> user -> assistant -> user，无中间 system
+	expectedRoles := []string{"system", "user", "assistant", "user"}
+	for i, wantRole := range expectedRoles {
+		m, ok := out[i].(map[string]any)
+		if !ok || m["role"] != wantRole {
+			t.Fatalf("msg[%d] role = %v, want %s", i, m["role"], wantRole)
+		}
+	}
+	// developer 上下文折叠到 turn 2 的 user 消息
+	u2, _ := out[3].(map[string]any)
+	wantContent := "<client_time_context>2026-11-23</client_time_context>\n\nTurn 2"
+	if u2["content"] != wantContent {
+		t.Fatalf("u2 content = %q, want %q", u2["content"], wantContent)
+	}
+}
+
+func TestSanitizeConversationMessages_TrailingDeveloper(t *testing.T) {
+	in := []any{
+		map[string]any{"role": "user", "content": "Turn 1"},
+		map[string]any{"role": "assistant", "content": "Answer 1"},
+		map[string]any{"role": "developer", "content": "Final note"},
+	}
+	out := SanitizeConversationMessages(in)
+	if len(out) != 3 {
+		t.Fatalf("expected 3 messages, got %d: %#v", len(out), out)
+	}
+	last, _ := out[2].(map[string]any)
+	if last["role"] != "user" || last["content"] != "Final note" {
+		t.Fatalf("trailing developer should become user message, got %#v", last)
+	}
+}
+
+func TestSanitizeConversationMessages_EmptyAssistantPruned(t *testing.T) {
+	in := []any{
+		map[string]any{"role": "user", "content": "Turn 1"},
+		map[string]any{"role": "assistant", "content": ""},
+		map[string]any{"role": "user", "content": "Turn 2"},
+	}
+	out := SanitizeConversationMessages(in)
+	if len(out) != 2 {
+		t.Fatalf("empty assistant should be pruned, got %d: %#v", len(out), out)
+	}
+}
+
+func TestSanitizeConversationMessages_OrphanToolAndAssistantPruned(t *testing.T) {
+	in := []any{
+		map[string]any{"role": "user", "content": "Turn 1"},
+		map[string]any{"role": "assistant", "content": "", "tool_calls": []any{
+			map[string]any{"id": "call_dead", "type": "function", "function": map[string]any{"name": "foo", "arguments": "{}"}},
+		}},
+		map[string]any{"role": "user", "content": "Turn 2"},
+	}
+	out := SanitizeConversationMessages(in)
+	if len(out) != 2 {
+		t.Fatalf("assistant with orphan tool call and empty content should be pruned, got %d: %#v", len(out), out)
+	}
+}
+
+func TestSanitizeConversationMessages_MultiModalUser(t *testing.T) {
+	in := []any{
+		map[string]any{"role": "user", "content": "Turn 1"},
+		map[string]any{"role": "assistant", "content": "Answer 1"},
+		map[string]any{"role": "developer", "content": "Context info"},
+		map[string]any{"role": "user", "content": []any{
+			map[string]any{"type": "text", "text": "Describe image"},
+			map[string]any{"type": "image_url", "image_url": map[string]any{"url": "data:image/png;base64,123"}},
+		}},
+	}
+	out := SanitizeConversationMessages(in)
+	if len(out) != 3 {
+		t.Fatalf("expected 3 messages, got %d: %#v", len(out), out)
+	}
+	last, _ := out[2].(map[string]any)
+	blocks, ok := last["content"].([]any)
+	if !ok || len(blocks) != 3 {
+		t.Fatalf("expected 3 content blocks, got %#v", last["content"])
+	}
+	b0, _ := blocks[0].(map[string]any)
+	if b0["type"] != "text" || b0["text"] != "Context info" {
+		t.Fatalf("b0 should be prepended text block, got %#v", b0)
+	}
+}

@@ -141,12 +141,16 @@ func normalizeRoles(obj map[string]any) {
 	}
 }
 
-// normalizeToolChoice 按上游 Go struct（string 类型）改写 OpenAI tool_choice。
+// NormalizeToolChoice 按上游 Go struct（string 类型）改写 OpenAI tool_choice。
 //   - "none"            → 删 tool_choice + 删 tools/functions
 //   - {"type":"none"}   → 同上
 //   - {"type":"auto"/"required"} → 字符串 "auto"/"required"
 //   - {"type":"function","function":{"name":"x"}} → 字符串 "x"
 //   - 其他对象/非标量 → 删 tool_choice
+func NormalizeToolChoice(obj map[string]any) {
+	normalizeToolChoice(obj)
+}
+
 func normalizeToolChoice(obj map[string]any) {
 	suppress := func() {
 		delete(obj, "tools")

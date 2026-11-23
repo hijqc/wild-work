@@ -20,6 +20,7 @@ import (
 	"strings"
 
 	"wild-work/internal/provider"
+	"wild-work/internal/upstream"
 )
 
 // handleResponses 处理 POST /v1/responses。
@@ -119,6 +120,12 @@ func responsesToChat(in map[string]any, resolvedModel string, maxTokensCap int) 
 	if len(msgs) == 0 {
 		return nil, fmt.Errorf("`input` is required and must contain at least one message")
 	}
+
+	// 规整消息列表：合并首部系统提示、折叠中间插入的 developer 指令至下一轮 user 上下文、清理孤儿工具配对与空 assistant
+	msgs = upstream.SanitizeConversationMessages(msgs)
+	if len(msgs) == 0 {
+		return nil, fmt.Errorf("`input` contains no valid messages after sanitization")
+	}
 	out["messages"] = msgs
 
 	// 采样参数
@@ -160,7 +167,10 @@ func responsesToChat(in map[string]any, resolvedModel string, maxTokensCap int) 
 		}
 	}
 	if tc, has := in["tool_choice"]; has && !isEmptyValue(tc) {
-		out["tool_choice"] = tc // Responses 与 Chat 的 tool_choice 形状兼容（auto/none/required/具体函数）
+		// tools 为空/未传时，tool_choice 没有意义，上游会判参数非法 (400)
+		if _, hasTools := out["tools"]; hasTools {
+			out["tool_choice"] = tc // Responses 与 Chat 的 tool_choice 形状兼容（auto/none/required/具体函数）
+		}
 	}
 	if v, ok := in["parallel_tool_calls"].(bool); ok {
 		out["parallel_tool_calls"] = v
@@ -253,11 +263,13 @@ func convertResponsesItems(items []any) ([]any, error) {
 			if content := convertResponsesContent(item["content"]); content != nil {
 				msg["content"] = content
 			}
-			out = append(out, msg)
+			if msg["content"] != nil {
+				out = append(out, msg)
+			}
 		case "system", "developer":
 			text := flattenText(item["content"])
 			if strings.TrimSpace(text) != "" {
-				out = append(out, map[string]any{"role": "system", "content": text})
+				out = append(out, map[string]any{"role": role, "content": text})
 			}
 		case "tool":
 			callID := firstNonEmpty(asString(item["tool_call_id"]), asString(item["call_id"]))
