@@ -652,3 +652,34 @@ func TestSanitizeConversationMessages_MergeAdjacentSystemMessages(t *testing.T) 
 	}
 }
 
+func TestSanitizeConversationMessages_MergeAdjacentAssistantMessages(t *testing.T) {
+	in := []any{
+		map[string]any{"role": "user", "content": "hello"},
+		map[string]any{"role": "assistant", "content": "I will run tool"},
+		map[string]any{
+			"role":    "assistant",
+			"content": "",
+			"tool_calls": []any{
+				map[string]any{"id": "call_1", "type": "function", "function": map[string]any{"name": "test", "arguments": "{}"}},
+			},
+		},
+		map[string]any{"role": "tool", "tool_call_id": "call_1", "content": "ok"},
+		map[string]any{"role": "user", "content": "next"},
+	}
+	out := SanitizeConversationMessages(in)
+	if len(out) != 4 {
+		t.Fatalf("expected 4 messages (two assistants merged), got %d: %#v", len(out), out)
+	}
+	asst := out[1].(map[string]any)
+	if asst["role"] != "assistant" {
+		t.Fatalf("expected assistant at idx 1, got %#v", asst)
+	}
+	if asst["content"] != "I will run tool" {
+		t.Fatalf("expected content 'I will run tool', got %#v", asst["content"])
+	}
+	tcs, ok := asst["tool_calls"].([]any)
+	if !ok || len(tcs) != 1 {
+		t.Fatalf("expected 1 tool call, got %#v", asst["tool_calls"])
+	}
+}
+

@@ -365,10 +365,30 @@ func SanitizeConversationMessages(messages []any) []any {
 			mergeSystemMessages(lastMsg, msg)
 			continue
 		}
+		if role == "assistant" && lastRole == "assistant" {
+			mergeAssistantMessages(lastMsg, msg)
+			continue
+		}
 		merged = append(merged, msg)
 	}
 
 	return merged
+}
+
+func mergeAssistantMessages(dst, src map[string]any) {
+	dstText := extractMessageText(dst["content"])
+	srcText := extractMessageText(src["content"])
+	if dstText == "" {
+		dst["content"] = src["content"]
+	} else if srcText != "" {
+		dst["content"] = dstText + "\n\n" + srcText
+	}
+
+	dstTCs, _ := dst["tool_calls"].([]any)
+	srcTCs, _ := src["tool_calls"].([]any)
+	if len(srcTCs) > 0 {
+		dst["tool_calls"] = append(dstTCs, srcTCs...)
+	}
 }
 
 func mergeUserMessages(dst, src map[string]any) {

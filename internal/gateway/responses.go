@@ -222,10 +222,11 @@ func convertResponsesItems(items []any) ([]any, error) {
 			if callID == "" {
 				return nil, fmt.Errorf("function_call item requires call_id")
 			}
-			// 连续多个 function_call（并行工具调用）合并进同一条 assistant 消息
+			// 连续多个 function_call 或紧跟在 assistant 文本后的 function_call 合并进同一条 assistant 消息
 			if n := len(out); n > 0 {
-				if last, ok := out[n-1].(map[string]any); ok && last["role"] == "assistant" && last["tool_calls"] != nil {
-					last["tool_calls"] = append(last["tool_calls"].([]any), functionCallToChatToolCall(callID, item))
+				if last, ok := out[n-1].(map[string]any); ok && last["role"] == "assistant" {
+					tcs, _ := last["tool_calls"].([]any)
+					last["tool_calls"] = append(tcs, functionCallToChatToolCall(callID, item))
 					continue
 				}
 			}
