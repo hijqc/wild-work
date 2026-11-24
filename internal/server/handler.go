@@ -1296,8 +1296,8 @@ func (h *Handler) serveRotation(
 						rt.Pool.NoteError(acct.UID, h.cfg.ErrThreshold, h.cfg.ErrCooldown)
 					}
 					clearSSEHeaders(w)
-					log.Printf("stream error before write platform=%s uid=%s model=%s kind=%s（换下一个账号）err=%v req=%s",
-						rt.Kind, acct.UID, model, kind, serr, sanitizeJSON(body))
+					log.Printf("stream error before write platform=%s uid=%s model=%s kind=%s（换下一个账号）err=%v",
+						rt.Kind, acct.UID, model, kind, serr)
 					lastErr = serr
 					lastKind = kind
 					// 额度耗尽透 402（付费墙语义，客户端/用户一看就知道要充值/换号），
@@ -2213,45 +2213,6 @@ func truncateBody(body []byte) string {
 		return s[:max]
 	}
 	return s
-}
-
-// sanitizeJSON 结构化请求摘要（对长字符串打码截断，零 token/正文泄露，保留完整 keys/roles 供排查）。
-func sanitizeJSON(raw []byte) string {
-	var v any
-	if err := json.Unmarshal(raw, &v); err != nil {
-		return truncateBody(raw)
-	}
-	maskJSONValue(v)
-	out, err := json.Marshal(v)
-	if err != nil {
-		return truncateBody(raw)
-	}
-	return string(out)
-}
-
-func maskJSONValue(v any) {
-	switch val := v.(type) {
-	case map[string]any:
-		for k, item := range val {
-			if s, ok := item.(string); ok {
-				if len(s) > 40 {
-					val[k] = s[:40] + fmt.Sprintf("...[len=%d]", len(s))
-				}
-			} else {
-				maskJSONValue(item)
-			}
-		}
-	case []any:
-		for i, item := range val {
-			if s, ok := item.(string); ok {
-				if len(s) > 40 {
-					val[i] = s[:40] + fmt.Sprintf("...[len=%d]", len(s))
-				}
-			} else {
-				maskJSONValue(item)
-			}
-		}
-	}
 }
 
 func WorkBuddyStaticModels() []provider.ModelInfo {
